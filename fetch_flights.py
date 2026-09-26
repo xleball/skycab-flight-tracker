@@ -61,20 +61,41 @@ def get_opensky_token(client_id: str, client_secret: str) -> str:
     return resp.json()["access_token"]
 
 
-def fetch_flights(token: str, icao24: str, begin: int, end: int) -> list:
-    resp = requests.get(
-        f"{OPENSKY_API_BASE}/flights/aircraft",
-        params={"icao24": icao24, "begin": begin, "end": end},
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=60,
-    )
-    if resp.status_code == 404:
-        # OpenSky renvoie 404 quand aucun vol n'est trouvé sur la période
-        return []
-    if not resp.ok:
-        print(f"Réponse OpenSky {resp.status_code} : {resp.text}", file=sys.stderr)
-    resp.raise_for_status()
-    return resp.json()
+def fetch_flights(token: str, icao24: str, begin: int, end: int, max_retries: int = 6) -> list:
+    """Interroge l'API OpenSky pour un aircraft sur une fenêtre donnée.
+
+    Réessaie automatiquement en cas de 429 (trop de requêtes), avec une
+    attente croissante, en respectant l'en-tête Retry-After si présent.
+    """
+    attempt = 0
+    while True:
+        resp = requests.get(
+            f"{OPENSKY_API_BASE}/flights/aircraft",
+            params={"icao24": icao24, "begin": begin, "end": end},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=60,
+        )
+        if resp.status_code == 404:
+            # OpenSky renvoie 404 quand aucun vol n'est trouvé sur la période
+            return []
+
+        if resp.status_code == 429:
+            attempt += 1
+            if attempt > max_retries:
+                print(f"Réponse OpenSky 429 persistante après {max_retries} tentatives, "
+                      f"abandon pour cette journée.", file=sys.stderr)
+                resp.raise_for_status()
+            retry_after = resp.headers.get("Retry-After")
+            wait_s = float(retry_after) if retry_after else min(10 * attempt, 90)
+            print(f"Réponse OpenSky 429 (trop de requêtes), nouvelle tentative dans "
+                  f"{wait_s:.0f}s (essai {attempt}/{max_retries})...", file=sys.stderr)
+            time.sleep(wait_s)
+            continue
+
+        if not resp.ok:
+            print(f"Réponse OpenSky {resp.status_code} : {resp.text}", file=sys.stderr)
+        resp.raise_for_status()
+        return resp.json()
 
 
 def to_iso(ts):
@@ -183,6 +204,7 @@ def main():
 
     all_flights = []
     seen_keys = set()
+    failed_days = []
 
     for i in range(days_back):
         day = today - timedelta(days=i)
@@ -195,7 +217,14 @@ def main():
 
         print(f"[{i+1}/{days_back}] Récupération des vols pour icao24={icao24} le "
               f"{day.isoformat()} UTC ({to_iso(begin)} -> {to_iso(end)})...")
-        day_flights = fetch_flights(token, icao24, begin, end)
+        try:
+            day_flights = fetch_flights(token, icao24, begin, end)
+        except requests.exceptions.HTTPError as exc:
+            print(f"  -> échec définitif pour le {day.isoformat()} ({exc}), "
+                  f"on continue avec les jours suivants.", file=sys.stderr)
+            failed_days.append(day.isoformat())
+            continue
+
         if day_flights:
             print(f"  -> {len(day_flights)} vol(s) trouvé(s) ce jour-là.")
 
@@ -205,11 +234,16 @@ def main():
                 seen_keys.add(key)
                 all_flights.append(fl)
 
-        # Petite pause entre les requêtes pour rester correct vis-à-vis des
-        # limites de débit de l'API, surtout utile sur un grand backfill.
-        time.sleep(0.4)
+        # Pause entre les requêtes pour rester correct vis-à-vis des limites
+        # de débit de l'API, surtout utile sur un grand backfill.
+        time.sleep(1.5)
 
     print(f"{len(all_flights)} vol(s) au total sur la période interrogée.")
+    if failed_days:
+        print(f"Attention : {len(failed_days)} jour(s) n'ont pas pu être récupérés "
+              f"malgré les tentatives : {', '.join(failed_days)}. Relance le workflow "
+              f"plus tard avec un DAYS_BACK ciblé pour compléter ces jours-là.",
+              file=sys.stderr)
 
     if not all_flights:
         print("Aucun vol à exporter, fin du script.")
