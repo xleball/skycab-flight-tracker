@@ -6,8 +6,8 @@ dans un dossier Google Drive.
 
 Conçu pour tourner comme une tâche planifiée GitHub Actions (voir
 .github/workflows/fetch-flights.yml), sans état persistant : chaque
-exécution récupère une fenêtre de 2 jours (le maximum autorisé par
-l'API OpenSky pour ce endpoint) avec un recouvrement volontaire sur
+exécution récupère une fenêtre d'environ 2 jours (le maximum autorisé
+par l'API OpenSky pour ce endpoint) avec un recouvrement volontaire sur
 l'exécution précédente, pour ne jamais rater un vol même en cas de
 run manqué. Les doublons éventuels entre deux fichiers successifs
 sont dédupliqués en aval (par Claude, lors du traitement du dossier
@@ -23,7 +23,7 @@ Variables d'environnement attendues :
 - AIRCRAFT_ICAO24 (optionnel) : adresse icao24 en minuscules,
   par défaut "a0dd81" (N155HR)
 - LOOKBACK_HOURS (optionnel) : profondeur de la fenêtre en heures,
-  par défaut 48 (max autorisé par l'API OpenSky pour cet endpoint)
+  par défaut 47.9 (juste sous la limite de 2 jours de l'API OpenSky)
 """
 
 import json
@@ -68,6 +68,8 @@ def fetch_flights(token: str, icao24: str, begin: int, end: int) -> list:
     if resp.status_code == 404:
         # OpenSky renvoie 404 quand aucun vol n'est trouvé sur la période
         return []
+    if not resp.ok:
+        print(f"Réponse OpenSky {resp.status_code} : {resp.text}", file=sys.stderr)
     resp.raise_for_status()
     return resp.json()
 
@@ -148,7 +150,7 @@ def main():
     sa_key_json = os.environ.get("GDRIVE_SA_KEY")
     folder_id = os.environ.get("GDRIVE_FOLDER_ID")
     icao24 = os.environ.get("AIRCRAFT_ICAO24", "a0dd81").lower()
-    lookback_hours = int(os.environ.get("LOOKBACK_HOURS", "48"))
+    lookback_hours = float(os.environ.get("LOOKBACK_HOURS", "47.9"))
 
     missing = [
         name
@@ -165,7 +167,7 @@ def main():
         sys.exit(1)
 
     now = int(time.time())
-    begin = now - lookback_hours * 3600
+    begin = int(now - lookback_hours * 3600)
     end = now
 
     print(f"Récupération des vols pour icao24={icao24} entre "
