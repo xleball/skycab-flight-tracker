@@ -193,16 +193,21 @@ def main():
         if end <= begin:
             continue
 
-        print(f"Récupération des vols pour icao24={icao24} le {day.isoformat()} UTC "
-              f"({to_iso(begin)} -> {to_iso(end)})...")
+        print(f"[{i+1}/{days_back}] Récupération des vols pour icao24={icao24} le "
+              f"{day.isoformat()} UTC ({to_iso(begin)} -> {to_iso(end)})...")
         day_flights = fetch_flights(token, icao24, begin, end)
-        print(f"  -> {len(day_flights)} vol(s) trouvé(s) ce jour-là.")
+        if day_flights:
+            print(f"  -> {len(day_flights)} vol(s) trouvé(s) ce jour-là.")
 
         for fl in day_flights:
             key = (fl.get("icao24"), fl.get("firstSeen"))
             if key not in seen_keys:
                 seen_keys.add(key)
                 all_flights.append(fl)
+
+        # Petite pause entre les requêtes pour rester correct vis-à-vis des
+        # limites de débit de l'API, surtout utile sur un grand backfill.
+        time.sleep(0.4)
 
     print(f"{len(all_flights)} vol(s) au total sur la période interrogée.")
 
