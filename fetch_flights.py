@@ -5,11 +5,14 @@ icao24 = a0dd81) via l'API OpenSky Network, et dépose un fichier CSV
 dans un dossier Google Drive.
 
 Conçu pour tourner comme une tâche planifiée GitHub Actions (voir
-.github/workflows/fetch-flights.yml), sans état persistant : chaque
-exécution récupère une fenêtre d'environ 2 jours (le maximum autorisé
-par l'API OpenSky pour ce endpoint) avec un recouvrement volontaire sur
-l'exécution précédente, pour ne jamais rater un vol même en cas de
-run manqué. Les doublons éventuels entre deux fichiers successifs
+.github/workflows/fetch-flights.yml), sans état persistant.
+
+L'API OpenSky partitionne ses données par jour calendaire UTC et
+refuse toute requête qui chevauche plus de 2 partitions (jours). On
+interroge donc un jour calendaire UTC complet à la fois, en remontant
+sur plusieurs jours à chaque exécution (recouvrement volontaire avec
+les exécutions précédentes, pour ne jamais rater un vol même en cas
+de run manqué). Les doublons éventuels entre deux fichiers successifs
 sont dédupliqués en aval (par Claude, lors du traitement du dossier
 Drive), sur la base du couple (icao24, firstSeen).
 
@@ -22,11 +25,11 @@ Variables d'environnement attendues :
   "Éditeur" avec l'adresse e-mail du compte de service)
 - AIRCRAFT_ICAO24 (optionnel) : adresse icao24 en minuscules,
   par défaut "a0dd81" (N155HR)
-- LOOKBACK_HOURS (optionnel) : profondeur de la fenêtre en heures,
-  par défaut 47.9 (juste sous la limite de 2 jours de l'API OpenSky)
+- DAYS_BACK (optionnel) : nombre de jours calendaires UTC à interroger
+  en remontant depuis aujourd'hui, par défaut 3 (aujourd'hui, hier,
+  avant-hier)
 """
 
-import json
 import os
 import sys
 import tempfile
@@ -78,6 +81,13 @@ def to_iso(ts):
     if ts is None:
         return ""
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def day_bounds_utc(date_obj):
+    """Retourne (begin_epoch, end_epoch) pour une journée calendaire UTC complète."""
+    start = datetime(date_obj.year, date_obj.month, date_obj.day, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    return int(start.timestamp()), int(end.timestamp())
 
 
 def write_csv(flights: list, icao24: str, out_path: str):
@@ -150,7 +160,7 @@ def main():
     sa_key_json = os.environ.get("GDRIVE_SA_KEY")
     folder_id = os.environ.get("GDRIVE_FOLDER_ID")
     icao24 = os.environ.get("AIRCRAFT_ICAO24", "a0dd81").lower()
-    lookback_hours = float(os.environ.get("LOOKBACK_HOURS", "47.9"))
+    days_back = int(os.environ.get("DAYS_BACK", "3"))
 
     missing = [
         name
@@ -166,25 +176,44 @@ def main():
         print(f"Variables d'environnement manquantes : {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
 
-    now = int(time.time())
-    begin = int(now - lookback_hours * 3600)
-    end = now
-
-    print(f"Récupération des vols pour icao24={icao24} entre "
-          f"{to_iso(begin)} et {to_iso(end)}...")
-
     token = get_opensky_token(client_id, client_secret)
-    flights = fetch_flights(token, icao24, begin, end)
-    print(f"{len(flights)} vol(s) trouvé(s) sur la fenêtre.")
 
-    if not flights:
+    now = int(time.time())
+    today = datetime.now(timezone.utc).date()
+
+    all_flights = []
+    seen_keys = set()
+
+    for i in range(days_back):
+        day = today - timedelta(days=i)
+        begin, end = day_bounds_utc(day)
+        if begin > now:
+            continue
+        end = min(end, now)
+        if end <= begin:
+            continue
+
+        print(f"Récupération des vols pour icao24={icao24} le {day.isoformat()} UTC "
+              f"({to_iso(begin)} -> {to_iso(end)})...")
+        day_flights = fetch_flights(token, icao24, begin, end)
+        print(f"  -> {len(day_flights)} vol(s) trouvé(s) ce jour-là.")
+
+        for fl in day_flights:
+            key = (fl.get("icao24"), fl.get("firstSeen"))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                all_flights.append(fl)
+
+    print(f"{len(all_flights)} vol(s) au total sur la période interrogée.")
+
+    if not all_flights:
         print("Aucun vol à exporter, fin du script.")
         return
 
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"vols_{icao24}_{run_stamp}.csv"
     local_path = os.path.join(tempfile.gettempdir(), filename)
-    write_csv(flights, icao24, local_path)
+    write_csv(all_flights, icao24, local_path)
 
     uploaded = upload_to_drive(local_path, filename, folder_id, sa_key_json)
     print(f"Fichier déposé sur Google Drive : {uploaded.get('name')} "
