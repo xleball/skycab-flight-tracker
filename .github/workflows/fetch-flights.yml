@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
+    inputs:
+      days_back:
+        description: "Nombre de jours à remonter (laisser vide = 3, par défaut)"
+        required: false
+        default: "3"
 jobs:
   fetch-flights:
     runs-on: ubuntu-latest
@@ -22,4 +27,5 @@ jobs:
           GDRIVE_SA_KEY: ${{ secrets.GDRIVE_SA_KEY }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           AIRCRAFT_ICAO24: "a0dd81"
+          DAYS_BACK: ${{ github.event.inputs.days_back || '3' }}
         run: python fetch_flights.py
