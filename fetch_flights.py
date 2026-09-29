@@ -27,7 +27,12 @@ Variables d'environnement attendues :
   par défaut "a0dd81" (N155HR)
 - DAYS_BACK (optionnel) : nombre de jours calendaires UTC à interroger
   en remontant depuis aujourd'hui, par défaut 3 (aujourd'hui, hier,
-  avant-hier)
+  avant-hier). Ignoré si BEGIN_DATE est défini.
+- BEGIN_DATE, END_DATE (optionnels, format YYYY-MM-DD, UTC) : si
+  définis, interroge exactement cette plage de dates (bornes incluses)
+  au lieu d'une fenêtre glissante depuis aujourd'hui. Utile pour
+  compléter uniquement les jours manqués d'un backfill précédent sans
+  retraiter ceux qui ont déjà réussi.
 """
 
 import os
@@ -182,6 +187,8 @@ def main():
     folder_id = os.environ.get("GDRIVE_FOLDER_ID")
     icao24 = os.environ.get("AIRCRAFT_ICAO24", "a0dd81").lower()
     days_back = int(os.environ.get("DAYS_BACK", "3"))
+    begin_date_str = os.environ.get("BEGIN_DATE", "").strip()
+    end_date_str = os.environ.get("END_DATE", "").strip()
 
     missing = [
         name
@@ -202,12 +209,29 @@ def main():
     now = int(time.time())
     today = datetime.now(timezone.utc).date()
 
+    if begin_date_str:
+        begin_date = datetime.strptime(begin_date_str, "%Y-%m-%d").date()
+        end_date = (
+            datetime.strptime(end_date_str, "%Y-%m-%d").date()
+            if end_date_str
+            else today
+        )
+        days_to_query = []
+        d = end_date
+        while d >= begin_date:
+            days_to_query.append(d)
+            d -= timedelta(days=1)
+        print(f"Plage de dates explicite : {begin_date.isoformat()} -> "
+              f"{end_date.isoformat()} ({len(days_to_query)} jour(s)).")
+    else:
+        days_to_query = [today - timedelta(days=i) for i in range(days_back)]
+
+    total_days = len(days_to_query)
     all_flights = []
     seen_keys = set()
     failed_days = []
 
-    for i in range(days_back):
-        day = today - timedelta(days=i)
+    for i, day in enumerate(days_to_query):
         begin, end = day_bounds_utc(day)
         if begin > now:
             continue
@@ -215,7 +239,7 @@ def main():
         if end <= begin:
             continue
 
-        print(f"[{i+1}/{days_back}] Récupération des vols pour icao24={icao24} le "
+        print(f"[{i+1}/{total_days}] Récupération des vols pour icao24={icao24} le "
               f"{day.isoformat()} UTC ({to_iso(begin)} -> {to_iso(end)})...")
         try:
             day_flights = fetch_flights(token, icao24, begin, end)
@@ -242,7 +266,8 @@ def main():
     if failed_days:
         print(f"Attention : {len(failed_days)} jour(s) n'ont pas pu être récupérés "
               f"malgré les tentatives : {', '.join(failed_days)}. Relance le workflow "
-              f"plus tard avec un DAYS_BACK ciblé pour compléter ces jours-là.",
+              f"plus tard avec BEGIN_DATE/END_DATE ciblés sur ces jours-là pour les "
+              f"compléter sans retraiter le reste.",
               file=sys.stderr)
 
     if not all_flights:
