@@ -5,9 +5,17 @@ on:
   workflow_dispatch:
     inputs:
       days_back:
-        description: "Nombre de jours à remonter (laisser vide = 3, par défaut)"
+        description: "Nombre de jours à remonter depuis aujourd'hui (ignoré si begin_date est rempli)"
         required: false
         default: "3"
+      begin_date:
+        description: "Date de début YYYY-MM-DD (optionnel, pour cibler une plage précise)"
+        required: false
+        default: ""
+      end_date:
+        description: "Date de fin YYYY-MM-DD (optionnel, par défaut aujourd'hui si begin_date est rempli)"
+        required: false
+        default: ""
 jobs:
   fetch-flights:
     runs-on: ubuntu-latest
@@ -28,4 +36,6 @@ jobs:
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           AIRCRAFT_ICAO24: "a0dd81"
           DAYS_BACK: ${{ github.event.inputs.days_back || '3' }}
+          BEGIN_DATE: ${{ github.event.inputs.begin_date || '' }}
+          END_DATE: ${{ github.event.inputs.end_date || '' }}
         run: python fetch_flights.py
